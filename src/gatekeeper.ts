@@ -13,10 +13,19 @@
  *
  * Scoring context (starter prompt): +12 correct, −6 approve a trap,
  * −3 reject a valid task, −2 timeout/offline, −2 proof fails. An omitted or
- * invalid proof on an otherwise-provable task costs points, so on APPROVE we
- * try to attach a real Groth16 proof + public_signals and submit via Kurier;
- * if proof generation is unavailable (see src/proofs.ts TODO) the decision
- * is still returned without the proof fields.
+ * invalid proof on an otherwise-provable task costs points, so for EVERY
+ * decided task we try to attach a real Groth16 proof + public_signals
+ * (input mapping recovered — see CIRCUIT_INPUTS.md) and submit via Kurier
+ * when configured.
+ *
+ * SEMANTIC TRAP: the circuit only knows its 5 conditions (vk match,
+ * balance ≥ minimum, amount ≤ maxTransfer, recipient match,
+ * currentBlock ≤ expiryBlock). This module additionally rejects for
+ * extra-circuit reasons (INVALID_INPUT, PROOF_REUSED, EXPIRED_TASK). For a
+ * circuit-genuine task rejected for an extra-circuit reason, fullProve
+ * with decision=0 ASSERT-FAILS by design — the proof is then omitted and
+ * the case is logged explicitly. Decision logic here is NOT bent to force
+ * agreement with the circuit.
  */
 import { generateGatekeeperProof, GATEKEEPER_VK_HASH } from './proofs.js';
 import { submitProofAndWaitFinalized } from './kurier.js';
@@ -164,25 +173,46 @@ export function evaluateGatekeeper(
   return { decision: 'APPROVE', reason_code: 'OK', proof_tx: proofTx };
 }
 
+/** Reason codes the Gatekeeper circuit itself can prove (its 5 conditions). */
+const CIRCUIT_REASON_CODES = new Set([
+  'OK', // genuine -> APPROVE
+  'VK_SUBSTITUTION',
+  'INSUFFICIENT_BALANCE',
+  'AMOUNT_EXCEEDS_MAX',
+  'RECIPIENT_MISMATCH',
+  'EXPIRED',
+]);
+
 /**
- * Full task processing: evaluate -> on APPROVE, attempt proof generation and
- * (when KURIER_API_KEY is set) Kurier submission to zkVerify. Always returns
- * a decision object; never throws for task-level problems (fail closed).
+ * Full task processing: evaluate -> attempt Groth16 proof generation for
+ * the decision (APPROVE and REJECT alike) -> on success attach
+ * proof/public_signals and (when KURIER_API_KEY is set) submit via Kurier
+ * to zkVerify. Always returns a decision object; never throws for
+ * task-level problems (fail closed). Proof/Kurier failures never fail the
+ * response — the decision stands, the proof is simply omitted.
  */
 export async function processGatekeeperTask(
   task: GatekeeperTask,
 ): Promise<GatekeeperResponse> {
   const response = evaluateGatekeeper(task);
-  if (response.decision !== 'APPROVE') return response;
 
-  // On provable tasks the response should carry our own Groth16 proof +
-  // public_signals. Generation is stubbed until circuit inputs are mapped
-  // (src/proofs.ts TODO) — in that case proof fields are omitted, which the
-  // platform scores as a proof miss but keeps the decision.
   const generated = await generateGatekeeperProof(
-    task.input as unknown as Record<string, unknown>,
+    task as unknown as Parameters<typeof generateGatekeeperProof>[0],
+    response.decision,
   );
-  if (!generated) return response;
+  if (!generated) {
+    if (!CIRCUIT_REASON_CODES.has(response.reason_code)) {
+      // Expected assert-failure class: the task may be circuit-genuine
+      // but was rejected for an extra-circuit reason (replayed proof_tx,
+      // past deadline_at, invalid timestamps, malformed input), so the
+      // circuit cannot prove decision=0 for it. Logged explicitly.
+      console.error(
+        `[gatekeeper] proof omitted: task ${task.task_id ?? '?'} rejected for extra-circuit reason ${response.reason_code}; ` +
+          'the circuit only proves its 5 conditions, so no Groth16 proof can be produced for this decision',
+      );
+    }
+    return response;
+  }
 
   response.proof = generated.proof;
   response.public_signals = generated.publicSignals;

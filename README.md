@@ -63,10 +63,11 @@ src/hmac.ts         HMAC sign/verify (timing-safe)
 src/gatekeeper.ts   Proof Gatekeeper checks (7 rules, in spec order)
 src/steal.ts        Steal the VFY turn handling + publicInputsHash (keccak256, viem)
 src/strategy.ts     ⚠ USER-OWNED strategy params — intentionally EMPTY (see below)
-src/proofs.ts       snarkjs Groth16 proof generation (circuit inputs mapped — see FINDINGS.md)
+src/proofs.ts       snarkjs Groth16 proof generation (Gatekeeper LIVE — see CIRCUIT_INPUTS.md)
 src/kurier.ts       Kurier submit + poll until Finalized (≤45 s)
 circuits/           Groth16/BN128 artifacts (gitignored, re-fetch via script)
 test/harness.mjs    signed end-to-end harness (27 checks)
+test/proof.test.mjs real proof generation + local verify (npm run test:proof)
 ```
 
 ## Circuits
@@ -76,10 +77,35 @@ test/harness.mjs    signed end-to-end harness (27 checks)
 | Proof Gatekeeper | `GatekeeperEvaluation` | `0x6b79c6012a6d8651f3e13bc4d2a20370280ab49700c90c5316d4168bfbad77b0` | 13 |
 | Steal the VFY | `VfyPolicyProof` | `0x6c56509f1c56fd1fd4e9737f906d2220f4b95f1d507f1adf6899085bd74be047` | 9 |
 
-Input-signal names for both circuits were recovered by probing the WASM
-witness calculators and the mappings are implemented in `src/proofs.ts` —
-see **FINDINGS.md** for exactly what was verified, what is still assumed
-(encodings, `decision`/`salt` semantics), and what remains stubbed.
+Input-signal names for both circuits were recovered by dictionary attack
+against the WASM witness calculators (Circom 2.x resolves input names by
+FNV-1a hash) — see **CIRCUIT_INPUTS.md** for the full evidence.
+
+**Proof Gatekeeper proof generation is LIVE:** `src/proofs.ts` maps the
+task envelope to the 13 `GatekeeperEvaluation` inputs (decision 1 =
+APPROVE / 0 = REJECT, fresh random `salt` per task), runs
+`snarkjs.groth16.fullProve`, attaches `proof` + `public_signals` to the
+response, and submits via Kurier when `KURIER_API_KEY` is set. Validated
+end-to-end: genuine tasks prove with decision=1, traps prove with
+decision=0, and both verify locally against the exported verification key
+(`npm run test:proof`). Caveat: the circuit only proves its own 5
+conditions — a task rejected for an *extra-circuit* reason (replayed
+proof_tx, past deadline, bad timestamps) cannot be proven with
+decision=0 (the circuit assert-fails on a genuine task with decision=0),
+so in that case the proof is omitted and the case is logged explicitly.
+
+> ⚠ **taskId conversion caveat:** the envelope's `task_id` is a string
+> like `gk_8d31_...`; how the platform maps it to the circuit's `taskId`
+> field element is **not documented**. `taskIdToField()` in
+> `src/proofs.ts` implements a best-effort heuristic (numeric → BigInt;
+> trailing hex segment → BigInt; otherwise keccak256 mod prime). This
+> **must be confirmed against a practice-task payload** before scored
+> rounds — the platform's own conversion wins.
+
+**Steal the VFY remains blocked** (unchanged): the input names are
+recovered, but the commitment derivation (how `commitment` is computed
+from `strategyParams[8]` + `salt` — an unpublished Poseidon preimage
+layout) is unknown, and the user's strategy params are unset by design.
 
 ## Deploy to Vercel (sketch)
 
@@ -93,8 +119,8 @@ see **FINDINGS.md** for exactly what was verified, what is still assumed
 
 > ⚠ Circuit artifacts (wasm/zkey, ~5.9 MB total) are gitignored. If proof
 > generation must run on Vercel, the artifacts must be made available to the
-> function (bundle them / fetch at cold start) — currently an open TODO;
-> see FINDINGS.md. The decision path works without them (proof omitted).
+> function (bundle them / fetch at cold start) — currently an open TODO.
+> The decision path works without them (proof omitted).
 
 ## Registration steps (dashboard, by the user)
 
@@ -123,10 +149,12 @@ committed via `strategyCommitment.hash`.
 ## Open TODOs
 
 - [ ] HMAC algorithm assumption (SHA-256 hex) — confirm via dashboard preflight.
-- [ ] `decision` encoding (1 = APPROVE) and `salt` semantics in the
-      Gatekeeper circuit — assumptions documented in FINDINGS.md.
-- [ ] Strategy params (user) + how `strategyCommitment.hash` is computed
-      from `strategyParams` + `salt` (Poseidon arrangement TBD).
+- [x] Gatekeeper proof generation — LIVE (mapping recovered and validated;
+      see CIRCUIT_INPUTS.md, `npm run test:proof`).
+- [ ] `taskId` string→field conversion — heuristic in `taskIdToField()`
+      must be confirmed against a practice-task payload.
+- [ ] Strategy params (user) + how `commitment` is computed
+      from `strategyParams[8]` + `salt` (Poseidon derivation unpublished).
 - [ ] Kurier API key + HMAC secret from the user (secure channel only).
 - [ ] Circuit artifacts availability on Vercel for in-function proving.
 - [ ] Deploy + registration (user-approved steps).
