@@ -39,7 +39,7 @@ npm install
 npm run download-circuits   # fetch wasm+zkey artifacts into circuits/ (gitignored)
 cp .env.example .env         # fill in AGENT_GAMES_HMAC_SECRET at minimum
 npm test                     # builds + boots the server + runs the HTTP harness
-npm start                    # node dist/server.js (PORT, default 8787)
+npm start                    # node dist/tools/server.js (PORT, default 8787)
 curl localhost:8787/health
 ```
 
@@ -57,7 +57,7 @@ curl localhost:8787/health
 ```
 api/agent.ts        Vercel adapter (raw body, bodyParser off)
 api/health.ts       Vercel health adapter
-server.ts           local node:http server (same handler)
+tools/server.ts     local node:http server (same handler)
 src/handler.ts      routing, signature gate, fail-closed errors
 src/hmac.ts         HMAC sign/verify (timing-safe)
 src/gatekeeper.ts   Proof Gatekeeper checks (7 rules, in spec order)

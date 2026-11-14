@@ -169,7 +169,7 @@ async function main() {
 
   console.log('gatekeeper proof — through the HTTP handler:');
   {
-    const proc = spawn('node', ['dist/server.js'], {
+    const proc = spawn('node', ['dist/tools/server.js'], {
       cwd: projectRoot,
       env: {
         ...process.env,

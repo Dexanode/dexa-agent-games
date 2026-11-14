@@ -1,5 +1,5 @@
 /**
- * End-to-end harness: boots the real local server (dist/server.js) with a
+ * End-to-end harness: boots the real local server (dist/tools/server.js) with a
  * test HMAC secret, then exercises it over HTTP with properly signed
  * requests:
  *   - preflight
@@ -99,7 +99,7 @@ function gatekeeperTask(inputOverrides = {}, taskOverrides = {}) {
 }
 
 async function main() {
-  const proc = spawn('node', ['dist/server.js'], {
+  const proc = spawn('node', ['dist/tools/server.js'], {
     cwd: projectRoot,
     env: {
       ...process.env,

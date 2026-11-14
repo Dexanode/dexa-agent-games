@@ -1,1 +1,1 @@
-{"$schema":"https://openapi.vercel.sh/vercel.json","buildCommand":"bash scripts/download-circuits.sh && npm run build","functions":{"api/agent.ts":{"includeFiles":"circuits/**","maxDuration":60},"api/health.ts":{"maxDuration":10}}}
+{"$schema":"https://openapi.vercel.sh/vercel.json","buildCommand":"bash scripts/download-circuits.sh","functions":{"api/agent.ts":{"includeFiles":"circuits/**","maxDuration":60},"api/health.ts":{"maxDuration":10}}}

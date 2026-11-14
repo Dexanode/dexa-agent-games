@@ -1,7 +1,7 @@
 /**
  * Transport-agnostic Agent Games request handler.
  *
- * Used identically by the local node:http server (server.ts) and the Vercel
+ * Used identically by the local node:http server (tools/server.ts) and the Vercel
  * serverless adapter (api/agent.ts).
  *
  * Protocol rules enforced here:
