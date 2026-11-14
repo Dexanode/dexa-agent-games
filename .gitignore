@@ -1,0 +1,15 @@
+# secrets — never commit
+.env
+.env.*
+
+# deps / build
+node_modules/
+dist/
+
+# circuit build artifacts (re-fetch with scripts/download-circuits.sh)
+circuits/*.wasm
+circuits/*.zkey
+
+# misc
+*.log
+.DS_Store
