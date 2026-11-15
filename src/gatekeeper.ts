@@ -20,14 +20,28 @@
  *
  * SEMANTIC TRAP: the circuit only knows its 5 conditions (vk match,
  * balance ≥ minimum, amount ≤ maxTransfer, recipient match,
- * currentBlock ≤ expiryBlock). This module additionally rejects for
- * extra-circuit reasons (INVALID_INPUT, PROOF_REUSED, EXPIRED_TASK). For a
- * circuit-genuine task rejected for an extra-circuit reason, fullProve
- * with decision=0 ASSERT-FAILS by design — the proof is then omitted and
- * the case is logged explicitly. Decision logic here is NOT bent to force
+ * currentBlock < expiryBlock — STRICT, boundary-audited 2026-11-15).
+ * This module additionally rejects for extra-circuit reasons
+ * (INVALID_INPUT, PROOF_REUSED, EXPIRED_TASK). For a circuit-genuine task
+ * rejected for an extra-circuit reason, fullProve with decision=0
+ * ASSERT-FAILS by design — the proof is then omitted and the case is
+ * logged explicitly. Extra-circuit decisions are NEVER bent to force
  * agreement with the circuit.
+ *
+ * PROVE-OR-FLIP (added 2026-11-15): for the circuit's own 5 conditions the
+ * circuit IS the platform's ground truth. If our evaluated decision is
+ * contradicted by a circuit assert AND our reason is an in-circuit one,
+ * we re-prove the opposite decision and, when the circuit confirms it,
+ * adopt it (logged as CIRCUIT FLIP). This is a safety net for semantic
+ * drift between our rules and the circuit (the boundary audit found one:
+ * expiry equality). It can only fire on a provable disagreement — never
+ * on infrastructure failures, and never for extra-circuit reasons.
  */
-import { generateGatekeeperProof, GATEKEEPER_VK_HASH } from './proofs.js';
+import {
+  attemptGatekeeperProof,
+  GATEKEEPER_VK_HASH,
+  type GeneratedProof,
+} from './proofs.js';
 import { submitProofAndWaitFinalized } from './kurier.js';
 
 export interface GatekeeperInput {
@@ -139,11 +153,15 @@ export function evaluateGatekeeper(
     return reject('RECIPIENT_MISMATCH', proofTx);
   }
 
-  // 5. Proof/condition not expired on-chain.
+  // 5. Proof/condition not expired on-chain. STRICT inequality:
+  //    current_block == expiry_block is already expired. Verified against
+  //    the circuit itself by the boundary audit (tools/audit-boundaries.mjs,
+  //    2026-11-15): at equality the circuit proves REJECT and assert-fails
+  //    APPROVE. (Our original `>` check disagreed — the audit caught it.)
   if (
     typeof input.current_block !== 'number' ||
     typeof input.expiry_block !== 'number' ||
-    input.current_block > input.expiry_block
+    input.current_block >= input.expiry_block
   ) {
     return reject('EXPIRED', proofTx);
   }
@@ -184,33 +202,82 @@ const CIRCUIT_REASON_CODES = new Set([
 ]);
 
 /**
- * Full task processing: evaluate -> attempt Groth16 proof generation for
- * the decision (APPROVE and REJECT alike) -> on success attach
- * proof/public_signals and (when KURIER_API_KEY is set) submit via Kurier
- * to zkVerify. Always returns a decision object; never throws for
- * task-level problems (fail closed). Proof/Kurier failures never fail the
- * response — the decision stands, the proof is simply omitted.
+ * Prove an evaluated decision, with the prove-or-flip safety net: when
+ * the circuit assert-contradicts an IN-CIRCUIT decision, try the opposite
+ * decision; if the circuit proves that one, adopt it (the circuit is the
+ * ground truth for its 5 conditions). Extra-circuit decisions
+ * (PROOF_REUSED, EXPIRED_TASK, INVALID_INPUT) are never flipped — for a
+ * circuit-genuine task they assert-fail by design and simply carry no
+ * proof. Exported for tests.
+ */
+export async function proveGatekeeperDecision(
+  task: GatekeeperTask,
+  initial: GatekeeperResponse,
+): Promise<{ response: GatekeeperResponse; generated: GeneratedProof | null }> {
+  let response = initial;
+  const proofTask = task as unknown as Parameters<
+    typeof attemptGatekeeperProof
+  >[0];
+  let attempt = await attemptGatekeeperProof(proofTask, response.decision);
+
+  if (
+    attempt.status === 'assert' &&
+    CIRCUIT_REASON_CODES.has(response.reason_code)
+  ) {
+    const flipped = response.decision === 'APPROVE' ? 'REJECT' : 'APPROVE';
+    const retry = await attemptGatekeeperProof(proofTask, flipped);
+    if (retry.status === 'ok') {
+      console.error(
+        `[gatekeeper] CIRCUIT FLIP: task ${task.task_id ?? '?'} — our ${response.decision} (${response.reason_code}) ` +
+          `was contradicted by the circuit; adopting circuit-confirmed ${flipped}`,
+      );
+      response = {
+        decision: flipped,
+        reason_code: flipped === 'APPROVE' ? 'OK' : 'CIRCUIT_EVALUATION',
+        proof_tx: response.proof_tx,
+      };
+      attempt = retry;
+    } else {
+      console.error(
+        `[gatekeeper] circuit contradicted our ${response.decision} (${response.reason_code}) for task ${task.task_id ?? '?'} ` +
+          `but the flipped decision did not prove either (status ${retry.status}); keeping our decision without proof`,
+      );
+    }
+  }
+
+  if (attempt.status === 'ok') {
+    return { response, generated: attempt.generated };
+  }
+  if (!CIRCUIT_REASON_CODES.has(response.reason_code)) {
+    // Expected assert-failure class: the task may be circuit-genuine
+    // but was rejected for an extra-circuit reason (replayed proof_tx,
+    // past deadline_at, invalid timestamps, malformed input), so the
+    // circuit cannot prove decision=0 for it. Logged explicitly.
+    console.error(
+      `[gatekeeper] proof omitted: task ${task.task_id ?? '?'} rejected for extra-circuit reason ${response.reason_code}; ` +
+        'the circuit only proves its 5 conditions, so no Groth16 proof can be produced for this decision',
+    );
+  }
+  return { response, generated: null };
+}
+
+/**
+ * Full task processing: evaluate -> prove the decision (prove-or-flip)
+ * -> on success attach proof/public_signals and (when KURIER_API_KEY is
+ * set) submit via Kurier to zkVerify. Always returns a decision object;
+ * never throws for task-level problems (fail closed). Proof/Kurier
+ * failures never fail the response — the decision stands, the proof is
+ * simply omitted.
  */
 export async function processGatekeeperTask(
   task: GatekeeperTask,
 ): Promise<GatekeeperResponse> {
-  const response = evaluateGatekeeper(task);
-
-  const generated = await generateGatekeeperProof(
-    task as unknown as Parameters<typeof generateGatekeeperProof>[0],
-    response.decision,
+  const evaluated = evaluateGatekeeper(task);
+  const { response, generated } = await proveGatekeeperDecision(
+    task,
+    evaluated,
   );
   if (!generated) {
-    if (!CIRCUIT_REASON_CODES.has(response.reason_code)) {
-      // Expected assert-failure class: the task may be circuit-genuine
-      // but was rejected for an extra-circuit reason (replayed proof_tx,
-      // past deadline_at, invalid timestamps, malformed input), so the
-      // circuit cannot prove decision=0 for it. Logged explicitly.
-      console.error(
-        `[gatekeeper] proof omitted: task ${task.task_id ?? '?'} rejected for extra-circuit reason ${response.reason_code}; ` +
-          'the circuit only proves its 5 conditions, so no Groth16 proof can be produced for this decision',
-      );
-    }
     return response;
   }
 

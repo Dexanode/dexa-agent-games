@@ -21,9 +21,14 @@ import { createRequire } from 'node:module';
 
 const snarkjs = createRequire(import.meta.url)('snarkjs');
 import {
+  attemptGatekeeperProof,
   generateGatekeeperProof,
   taskIdToField,
 } from '../dist/src/proofs.js';
+import {
+  evaluateGatekeeper,
+  proveGatekeeperDecision,
+} from '../dist/src/gatekeeper.js';
 
 const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -165,6 +170,109 @@ async function main() {
       );
       check('trap proof verifies locally', ok === true);
     }
+  }
+
+  console.log('boundary semantics (audit 2026-11-15, tools/audit-boundaries.mjs):');
+  {
+    let n = 0;
+    const tx = () => '0x' + String(++n).padStart(64, 'f');
+    const eqExpiry = evaluateGatekeeper(
+      genuineEnvelope({ current_block: 8430000, proof_tx: tx() }),
+    );
+    check(
+      'evaluate: current == expiry -> REJECT EXPIRED (strict <)',
+      eqExpiry.decision === 'REJECT' && eqExpiry.reason_code === 'EXPIRED',
+      JSON.stringify(eqExpiry),
+    );
+    const amtEq = await generateGatekeeperProof(
+      genuineEnvelope({ amount: '1000' }),
+      'APPROVE',
+    );
+    check('circuit: amount == max_transfer proves APPROVE', amtEq !== null);
+    const balEq = await generateGatekeeperProof(
+      genuineEnvelope({ public_balance: '1000' }),
+      'APPROVE',
+    );
+    check('circuit: balance == minimum proves APPROVE', balEq !== null);
+    const expEqR = await generateGatekeeperProof(
+      genuineEnvelope({ current_block: 8430000 }),
+      'REJECT',
+    );
+    check('circuit: current == expiry proves REJECT', expEqR !== null);
+    const expEqA = await generateGatekeeperProof(
+      genuineEnvelope({ current_block: 8430000 }),
+      'APPROVE',
+    );
+    check('circuit: current == expiry cannot prove APPROVE', expEqA === null);
+  }
+
+  console.log('attemptGatekeeperProof statuses:');
+  {
+    const okA = await attemptGatekeeperProof(genuineEnvelope(), 'APPROVE');
+    check('genuine + APPROVE -> status ok', okA.status === 'ok', okA.status);
+    const assertA = await attemptGatekeeperProof(genuineEnvelope(), 'REJECT');
+    check(
+      'genuine + REJECT -> status assert',
+      assertA.status === 'assert',
+      assertA.status,
+    );
+  }
+
+  console.log('prove-or-flip (proveGatekeeperDecision):');
+  {
+    const genuine = genuineEnvelope();
+    const forced = {
+      decision: 'REJECT',
+      reason_code: 'INSUFFICIENT_BALANCE',
+      proof_tx: genuine.input.proof_tx,
+    };
+    const flipped = await proveGatekeeperDecision(genuine, forced);
+    check(
+      'flip: genuine + forced in-circuit REJECT -> APPROVE/OK',
+      flipped.response.decision === 'APPROVE' &&
+        flipped.response.reason_code === 'OK',
+      JSON.stringify(flipped.response),
+    );
+    check(
+      'flip: proof attached, decision signal == "1"',
+      flipped.generated !== null &&
+        flipped.generated.publicSignals[11] === '1',
+    );
+
+    const trapEnv = genuineEnvelope({
+      recipient: '0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+    });
+    const forcedA = {
+      decision: 'APPROVE',
+      reason_code: 'OK',
+      proof_tx: trapEnv.input.proof_tx,
+    };
+    const flippedT = await proveGatekeeperDecision(trapEnv, forcedA);
+    check(
+      'flip: trap + forced APPROVE -> REJECT/CIRCUIT_EVALUATION',
+      flippedT.response.decision === 'REJECT' &&
+        flippedT.response.reason_code === 'CIRCUIT_EVALUATION',
+      JSON.stringify(flippedT.response),
+    );
+    check(
+      'flip: trap proof attached, decision signal == "0"',
+      flippedT.generated !== null &&
+        flippedT.generated.publicSignals[11] === '0',
+    );
+
+    const forcedX = {
+      decision: 'REJECT',
+      reason_code: 'PROOF_REUSED',
+      proof_tx: genuine.input.proof_tx,
+    };
+    const notFlipped = await proveGatekeeperDecision(genuine, forcedX);
+    check(
+      'no flip: extra-circuit REJECT stays REJECT, no proof',
+      notFlipped.response.decision === 'REJECT' &&
+        notFlipped.response.reason_code === 'PROOF_REUSED' &&
+        notFlipped.generated === null,
+      JSON.stringify(notFlipped.response),
+    );
   }
 
   console.log('gatekeeper proof — through the HTTP handler:');

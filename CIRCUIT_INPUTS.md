@@ -169,3 +169,21 @@ fields are the public inputs, + 1 output = nPublic 9; `strategyParams[8]` +
 - `generatePolicyProof` (Steal): the input mapping can be written now
   (names/sizes certain), but proofs will not pass until the user's
   `strategyParams` are set and the commitment derivation is confirmed.
+
+## Boundary semantics — audited against the circuit (2026-11-15)
+
+`tools/audit-boundaries.mjs` proves BOTH decisions at each boundary of the
+5 conditions; the circuit is the ground truth. Results (11/11 decisive,
+exactly one decision provable per case):
+
+- amount ≤ maxTransfer is INCLUSIVE (amount == maxTransfer → APPROVE).
+- publicBalance ≥ minimum is INCLUSIVE (balance == minimum → APPROVE).
+- currentBlock < expiryBlock is STRICT (currentBlock == expiryBlock →
+  REJECT). Our rules originally used `>` for the expiry check and would
+  have APPROVED at equality — fixed in `evaluateGatekeeper` the same day.
+- amount == 0 and minimum == balance == 0 are genuine (APPROVE).
+
+Safety net: `proveGatekeeperDecision` (src/gatekeeper.ts) implements
+prove-or-flip — a circuit assert against an in-circuit decision triggers
+one re-prove of the opposite decision, which is adopted only if the
+circuit confirms it. Extra-circuit decisions are never flipped.
