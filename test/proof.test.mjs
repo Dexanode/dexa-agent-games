@@ -27,6 +27,7 @@ import {
 } from '../dist/src/proofs.js';
 import {
   evaluateGatekeeper,
+  processGatekeeperTask,
   proveGatekeeperDecision,
 } from '../dist/src/gatekeeper.js';
 
@@ -273,6 +274,55 @@ async function main() {
         notFlipped.generated === null,
       JSON.stringify(notFlipped.response),
     );
+  }
+
+  console.log('kurier wait is bounded (response latency fix 2026-11-16):');
+  {
+    // A bogus key makes the Kurier submit fail fast; a zero wait makes it
+    // abort immediately. Either way the DECISION must come back quickly
+    // with the proof attached — the response never blocks on Kurier.
+    process.env.KURIER_API_KEY = 'bogus-test-key-not-real';
+    try {
+      const started = Date.now();
+      const resp = await processGatekeeperTask(
+        genuineEnvelope({
+          proof_tx:
+            '0x1111111111111111111111111111111111111111111111111111111111111111',
+        }),
+      );
+      const elapsed = Date.now() - started;
+      check(
+        'bogus kurier key -> APPROVE with proof attached',
+        resp.decision === 'APPROVE' && resp.proof != null,
+        JSON.stringify(resp).slice(0, 200),
+      );
+      check(
+        `bogus kurier key -> fast response (${elapsed}ms < 20000ms)`,
+        elapsed < 20_000,
+      );
+
+      process.env.KURIER_WAIT_MS = '0';
+      const started0 = Date.now();
+      const resp0 = await processGatekeeperTask(
+        genuineEnvelope({
+          proof_tx:
+            '0x2222222222222222222222222222222222222222222222222222222222222222',
+        }),
+      );
+      const elapsed0 = Date.now() - started0;
+      check(
+        'KURIER_WAIT_MS=0 -> APPROVE with proof attached',
+        resp0.decision === 'APPROVE' && resp0.proof != null,
+        JSON.stringify(resp0).slice(0, 200),
+      );
+      check(
+        `KURIER_WAIT_MS=0 -> fast response (${elapsed0}ms < 20000ms)`,
+        elapsed0 < 20_000,
+      );
+    } finally {
+      delete process.env.KURIER_API_KEY;
+      delete process.env.KURIER_WAIT_MS;
+    }
   }
 
   console.log('gatekeeper proof — through the HTTP handler:');

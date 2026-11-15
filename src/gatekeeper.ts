@@ -264,7 +264,9 @@ export async function proveGatekeeperDecision(
 /**
  * Full task processing: evaluate -> prove the decision (prove-or-flip)
  * -> on success attach proof/public_signals and (when KURIER_API_KEY is
- * set) submit via Kurier to zkVerify. Always returns a decision object;
+ * set) submit via Kurier to zkVerify with a SHORT bounded wait (default
+ * 10s — the response must stay well inside the platform's 60s deadline).
+ * Always returns a decision object;
  * never throws for task-level problems (fail closed). Proof/Kurier
  * failures never fail the response — the decision stands, the proof is
  * simply omitted.
@@ -286,11 +288,24 @@ export async function processGatekeeperTask(
 
   const kurierKey = process.env.KURIER_API_KEY;
   if (kurierKey) {
+    // RESPONSE LATENCY (changed 2026-11-16): the Kurier wait is capped at
+    // 10s (env KURIER_WAIT_MS) instead of the client's 45s default. The
+    // decision + proof are already final at this point; waiting for
+    // on-chain finalization used to push typical responses to ~45-49s of
+    // the platform's 60s budget — the prime suspect for the one
+    // unanswered task in Round 3 (and possibly for proofs missing the
+    // platform's verification pipeline). If Kurier finalizes inside the
+    // short window we still attach proof_reference, exactly as before.
+    const waitRaw = Number(process.env.KURIER_WAIT_MS);
+    const waitMs =
+      Number.isFinite(waitRaw) && waitRaw >= 0 ? waitRaw : 10_000;
     const result = await submitProofAndWaitFinalized({
       proof: generated.proof,
       publicSignals: generated.publicSignals,
       vk: GATEKEEPER_VK_HASH,
       apiKey: kurierKey,
+      timeoutMs: waitMs,
+      pollIntervalMs: 1_500,
     });
     if (result?.finalized) {
       // ASSUMPTION: jobId doubles as the on-chain proof reference pointer.
