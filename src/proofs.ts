@@ -36,6 +36,7 @@
  * proof" here. Strategy remains user-owned (src/strategy.ts).
  */
 import { randomBytes } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { keccak256, toHex } from 'viem';
@@ -54,11 +55,34 @@ export interface GeneratedProof {
   publicSignals: string[];
 }
 
+let cachedCircuitsDir: string | null = null;
+
+/**
+ * Locate the circuits/ directory. The @vercel/node emitted layout is NOT
+ * stable across builds: this project has shipped both `dist/src/proofs.js`
+ * (two levels below the project root) and `src/proofs.js` (one level) —
+ * the same flip that broke dexa-proofcheck-bot on 2026-11-15. A fixed
+ * `../..` from here resolves to `/var/circuits` in the one-level layout,
+ * fullProve dies with ENOENT, and every response silently goes out
+ * WITHOUT a proof (decisions still score; nothing can be verified —
+ * the likely cause of 0 verified proofs in Rounds 3–4, diagnosed
+ * 2026-11-17 from a practice response that carried no proof). Probe the
+ * candidate locations and use the first that actually contains the
+ * artifacts; fall back to the historical default so failures stay loud.
+ */
 function circuitsDir(): string {
   if (process.env.CIRCUITS_DIR) return process.env.CIRCUITS_DIR;
-  // dist/src/proofs.js and src (dev) both sit two levels below project root.
+  if (cachedCircuitsDir) return cachedCircuitsDir;
   const here = path.dirname(fileURLToPath(import.meta.url));
-  return path.resolve(here, '..', '..', 'circuits');
+  const candidates = [
+    path.resolve(here, '..', '..', 'circuits'),
+    path.resolve(here, '..', 'circuits'),
+    path.resolve(process.cwd(), 'circuits'),
+  ];
+  cachedCircuitsDir =
+    candidates.find((dir) => existsSync(path.join(dir, 'gatekeeper.wasm'))) ??
+    candidates[0];
+  return cachedCircuitsDir;
 }
 
 async function fullProve(
